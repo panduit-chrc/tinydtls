@@ -37,6 +37,8 @@
 #  include "sha2/sha2.h"
 #endif
 
+#define DTLS10_VERSION 0xfeff
+
 /* Log configuration */
 #define LOG_MODULE "dtls"
 #define LOG_LEVEL  LOG_LEVEL_DTLS
@@ -349,6 +351,27 @@ static char const content_types[] = {
 #endif
 
 /**
+ * Checks if the content type of \p msg is known. This function returns
+ * the found content type, or 0 otherwise.
+ */
+#ifdef DTLS_CHECK_CONTENTTYPE
+static int
+known_content_type(const uint8_t *msg) {
+  unsigned int n;
+  assert(msg);
+
+  for (n = 0; (content_types[n] != 0) && (content_types[n]) != msg[0]; n++)
+    ;
+  return content_types[n];
+}
+#else  /* DTLS_CHECK_CONTENTTYPE */
+static int
+known_content_type(const uint8_t *msg) {
+  return msg[0];
+}
+#endif /* DTLS_CHECK_CONTENTTYPE */
+
+/**
  * Checks if \p msg points to a valid DTLS record. If
  * 
  */
@@ -356,20 +379,18 @@ static unsigned int
 is_record(uint8_t *msg, size_t msglen) {
   unsigned int rlen = 0;
 
-  if (msglen >= DTLS_RH_LENGTH	/* FIXME allow empty records? */
-#ifdef DTLS_CHECK_CONTENTTYPE
-      && strchr(content_types, msg[0])
-#endif
-      && msg[1] == HIGH(DTLS_VERSION)
-      && msg[2] == LOW(DTLS_VERSION)) 
-    {
-      rlen = DTLS_RH_LENGTH + 
-	dtls_uint16_to_int(DTLS_RECORD_HEADER(msg)->length);
+  if (msglen >= DTLS_RH_LENGTH) { /* FIXME allow empty records? */
+    uint16_t version = dtls_uint16_to_int(msg + 1);
+    if ((((version == DTLS_VERSION) || (version == DTLS10_VERSION))
+         && known_content_type(msg))) {
+        rlen = DTLS_RH_LENGTH +
+        dtls_uint16_to_int(DTLS_RECORD_HEADER(msg)->length);
       
       /* we do not accept wrong length field in record header */
       if (rlen > msglen)	
-	rlen = 0;
-  } 
+        rlen = 0;
+    } 
+  }
   
   return rlen;
 }
@@ -1496,6 +1517,17 @@ dtls_send_multi(dtls_context_t *ctx, dtls_peer_t *peer,
   for (i = 0; i < buf_array_len; i++) {
     dtls_debug_hexdump("send unencrypted", buf_array[i], buf_len_array[i]);
     overall_len += buf_len_array[i];
+  }
+
+  /* Signal DTLS version 1.0 in the record layer of ClientHello and
+   * HelloVerifyRequest handshake messages according to Section 4.2.1
+   * of RFC 6347.
+   */
+  if (type == DTLS_CT_HANDSHAKE) {
+    if ((buf_array[0][0] == DTLS_HT_CLIENT_HELLO) ||
+        (buf_array[0][0] == DTLS_HT_HELLO_VERIFY_REQUEST)) {
+      dtls_int_to_uint16(sendbuf + 1, DTLS10_VERSION);
+    }
   }
 
   if ((type == DTLS_CT_HANDSHAKE && buf_array[0][0] != DTLS_HT_HELLO_VERIFY_REQUEST) ||
